@@ -23,23 +23,28 @@ This guide provides step-by-step instructions to set up the entire SAM3 environm
 The server relies on a specific Python environment located in `sam3/.venv`. We need to create this env and install the SAM 3 dependencies.
 
 1.  **Open a terminal** and navigate to the `sam3` directory:
+
     ```powershell
     cd ..\sam3
     ```
 
 2.  **Create the Virtual Environment**:
     Since `sam3-dashboard/server/start_server.bat` expects the venv at `sam3/.venv`, create it there:
+
     ```powershell
     python -m venv .venv
     ```
-    *Note: If you are using Conda, you can create a prefix env:* `conda create -p ./.venv python=3.12`
+
+    _Note: If you are using Conda, you can create a prefix env:_ `conda create -p ./.venv python=3.12`
 
 3.  **Activate the Environment**:
+
     ```powershell
     .venv\Scripts\activate
     ```
 
 4.  **Install PyTorch (CUDA or CPU)**:
+
     - **For CUDA (NVIDIA GPU)**:
       ```powershell
       pip install torch==2.7.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
@@ -48,14 +53,14 @@ The server relies on a specific Python environment located in `sam3/.venv`. We n
       ```powershell
       pip install torch==2.7.0 torchvision torchaudio
       ```
-    *Note: Inference on CPU will be significantly slower than on GPU.*
+      _Note: Inference on CPU will be significantly slower than on GPU._
 
 5.  **Install SAM 3 & Dependencies**:
     ```powershell
     pip install -e .
     pip install -e ".[notebooks,train]"
     ```
-    *This installs the package in editable mode as per the paper's repository instructions.*
+    _This installs the package in editable mode as per the paper's repository instructions._
 
 ---
 
@@ -64,12 +69,14 @@ The server relies on a specific Python environment located in `sam3/.venv`. We n
 The server is a FastAPI application that loads the SAM 3 model and exposes endpoints for the dashboard.
 
 1.  **Navigate to the server directory**:
+
     ```powershell
     cd ..\sam3-dashboard\server
     ```
 
 2.  **Install Server Dependencies**:
     The server needs `fastapi`, `uvicorn`, etc. Ensure you are still in the `sam3` environment (or the script will handle it, but it's good to install deps manually first to be sure).
+
     ```powershell
     # Activate the sam3 venv if not already active
     ..\..\sam3\.venv\Scripts\activate
@@ -80,10 +87,13 @@ The server is a FastAPI application that loads the SAM 3 model and exposes endpo
 
 3.  **Run the Server**:
     We have provided a convenience script `start_server.bat` that automatically uses the `sam3/.venv` Python interpreter.
+
     ```powershell
-    start_server.bat
+    ./start_server.bat
     ```
-    *Expected Output:*
+
+    _Expected Output:_
+
     ```
     Starting SAM3 Dashboard Server using VENV: ..\..\sam3\.venv\Scripts\python.exe
     INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
@@ -98,18 +108,21 @@ The server is a FastAPI application that loads the SAM 3 model and exposes endpo
 The client is a modern Next.js 14+ application.
 
 1.  **Open a new terminal** and navigate to the client directory:
+
     ```powershell
     cd sam3-dashboard\client
     ```
 
 2.  **Install Dependencies**:
+
     ```powershell
-    npm install
+    bun install
     ```
 
 3.  **Run the Development Server**:
+
     ```powershell
-    npm run dev
+    bun run dev
     ```
 
 4.  **Access the Dashboard**:
@@ -120,13 +133,16 @@ The client is a modern Next.js 14+ application.
 ## usage
 
 ### 1. Dashboard Interface
+
 - **Inference Tab**: Upload images or videos to perform segmentation using SAM 3 concepts.
 - **Training Tab**: Trigger fine-tuning jobs. The server handles the execution of `sam3/train.py` scripts.
 
 ### 2. Model Configuration
+
 The system uses the configuration files located in `sam3/configs/`. Ensure your dataset paths in these configs are correct before triggering training tasks.
 
 ### 3. Monitoring
+
 - **TensorBoard**: TensorBoard logs are saved to `sam3-inference/tensorboard` (or as configured).
 - **Server Logs**: Check the server terminal for real-time inference logs.
 
