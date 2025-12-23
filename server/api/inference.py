@@ -3,6 +3,9 @@ from fastapi.responses import JSONResponse
 import shutil
 import os
 import uuid
+import numpy as np
+import cv2
+import base64
 from services.model import model_service
 
 router = APIRouter()
@@ -17,76 +20,341 @@ async def predict_image_endpoint(
     image: UploadFile = File(...), prompt: str = Form(None)
 ):
     try:
-        # Save temp file
-        file_ext = image.filename.split(".")[-1]
-        filename = f"{uuid.uuid4()}.{file_ext}"
-        file_path = os.path.join(UPLOAD_DIR, filename)
+        # Read image
+        contents = await image.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(image.file, buffer)
+        if img is None:
+            print(
+                f"WARN: cv2.imdecode returned None for {image.filename}. Trying tifffile..."
+            )
+            try:
+                import tifffile
+                import io
 
-        # Run inference
-        result = model_service.predict_image(file_path, prompt_text=prompt)
+                with io.BytesIO(contents) as f:
+                    img = tifffile.imread(f)
+
+                print(
+                    f"DEBUG: tifffile loaded image. Raw Shape: {img.shape}, Dtype: {img.dtype}"
+                )
+
+                # Handle Channel ordering: (C, H, W) -> (H, W, C)
+                # Heuristic: if ndim=3 and dim[0] is small (channels) and dim[1], dim[2] are large
+                if img.ndim == 3:
+                    c, h, w = img.shape
+                    if c < h and c < w and c <= 4:
+                        print(
+                            "DEBUG: Detected Channel-First image (C, H, W). Transposing to (H, W, C)."
+                        )
+                        img = np.transpose(img, (1, 2, 0))
+
+                # Normalize to uint8 if needed
+                if img.dtype != np.uint8:
+                    print("DEBUG: Normalizing image to uint8...")
+                    img_min = img.min()
+                    img_max = img.max()
+                    if img_max > img_min:
+                        img = ((img - img_min) / (img_max - img_min) * 255.0).astype(
+                            np.uint8
+                        )
+                    else:
+                        img = np.zeros(img.shape, dtype=np.uint8)
+
+                # Ensure BGR for OpenCV
+                if img.ndim == 2:  # Grayscale
+                    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                elif img.ndim == 3:
+                    # Check channels
+                    if img.shape[2] == 3:
+                        # Tifffile usually reads RGB. OpenCV needs BGR.
+                        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                    elif img.shape[2] == 4:
+                        img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+
+            except Exception as e:
+                print(f"ERROR: tifffile failed: {e}")
+                import traceback
+
+                traceback.print_exc()
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Could not decode image. OpenCV and Tifffile failed. Error: {e}",
+                )
+
+        if img is None:
+            raise HTTPException(status_code=400, detail="Image decoding failed.")
+
+        print(
+            f"DEBUG: Final Image passed to model. Shape: {img.shape}, Dtype: {img.dtype}, Max: {img.max()}"
+        )
+
+        # Run Inference
+        # Model Service will handle loading the model if not loaded
+        result = model_service.predict_image(img, prompt)
+        print(f"DEBUG: Inference Result Keys: {result.keys()}")
+        if "masks" in result:
+            print(f"DEBUG: Number of masks found: {len(result['masks'])}")
+        else:
+            print("DEBUG: No 'masks' key in result.")
 
         # Visualize results (Draw masks/boxes on image)
-        import cv2
-        import numpy as np
-        import base64
 
-        # Load original image
-        img = cv2.imread(file_path)
-        if img is None:
-             raise HTTPException(status_code=400, detail="Could not read uploaded image")
-        
-        # Combine all masks
-        if "masks" in result and len(result["masks"]) > 0:
+        # Prepare data for visualization utils
+        if "masks" in result:
+            # Format inputs for render_masklet_frame
+            # Check dimensions and format of masks
             masks = np.array(result["masks"])
-            # masks shape is (N, H, W)
-            
-            # Create a colored overlay
-            overlay = img.copy()
-            
-            # Simple visualization: iterate masks and add color
-            # Just collapsing to single mask for simple view if multiple
-            combined_mask = np.zeros(img.shape[:2], dtype=np.uint8)
-            
-            for i, m in enumerate(masks):
-                # m might be boolean or float
-                m = m.astype(np.uint8)
-                if m.max() <= 1: 
-                    m = m * 255
-                
-                # Resize m to img shape if needed (though SAM3 should return correct size)
-                if m.shape != img.shape[:2]:
-                     m = cv2.resize(m, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_NEAREST)
-                
-                combined_mask = cv2.bitwise_or(combined_mask, m)
+            boxes = np.array(result["boxes"]) if "boxes" in result else []
+            scores = np.array(result["scores"]) if "scores" in result else []
 
-            # Apply Green overlay where mask is present
-            # BGR format
-            img[combined_mask > 0] = img[combined_mask > 0] * 0.5 + np.array([0, 255, 0]) * 0.5
-            
-            # Draw boxes if available
-            if "boxes" in result:
-                 for box in result["boxes"]:
-                      x, y, w, h = map(int, box)
-                      cv2.rectangle(img, (x, y), (x + w, y + h), (0, 0, 255), 2)
+            # Helper to normalize boxes to XYWH if needed, but render_masklet_frame expects keys
+            # render_masklet_frame expects:
+            # outputs = {
+            #     "out_boxes_xywh": [list, ...],
+            #     "out_probs": [float, ...],
+            #     "out_obj_ids": [int, ...],
+            #     "out_binary_masks": [np.array, ...]
+            # }
+
+            formatted_outputs = {
+                "out_boxes_xywh": [],
+                "out_probs": [],
+                "out_obj_ids": [],
+                "out_binary_masks": [],
+            }
+
+            H, W = img.shape[:2]
+
+            for i in range(len(masks)):
+                # Mask
+                m = masks[i]
+                # Squeeze if (1, H, W)
+                if m.ndim == 3 and m.shape[0] == 1:
+                    m = m.squeeze(0)
+
+                # Handle logits if necessary (threshold > 0)
+                if np.issubdtype(m.dtype, np.floating):
+                    m = (m > 0).astype(np.uint8)
+                elif m.dtype == bool:
+                    m = m.astype(np.uint8)
+                else:
+                    m = (m > 0).astype(np.uint8)  # assume non-zero is mask
+
+                formatted_outputs["out_binary_masks"].append(m)
+
+                # Score
+                score = scores[i] if i < len(scores) else 1.0
+                formatted_outputs["out_probs"].append(score)
+
+                # ID
+                formatted_outputs["out_obj_ids"].append(i)
+
+                # Box - SAM returns XYXY usually, utils might expect XYWH
+                # Let's check boxes format. model.py returns boxes.tolist().
+                # Assuming SAM3 returns XYXY. render_masklet_frame expects XYWH (relative or absolute?)
+                # Looking at render_masklet_frame source:
+                # x, y, w, h = box_xywh
+                # x1 = int(x * width) ...
+                # So it expects RELATIVE XYWH format (0-1).
+
+                if i < len(boxes):
+                    box = boxes[i]  # [x1, y1, x2, y2] absolute pixels
+                    # Convert to relative XYWH
+                    x1, y1, x2, y2 = box
+                    w_box = x2 - x1
+                    h_box = y2 - y1
+                    rel_box = [x1 / W, y1 / H, w_box / W, h_box / H]
+                    formatted_outputs["out_boxes_xywh"].append(rel_box)
+                else:
+                    formatted_outputs["out_boxes_xywh"].append([0, 0, 0, 0])
+
+            # Define custom renderer for larger labels
+            def render_enhanced_masklet(img, outputs, alpha=0.5):
+                """
+                Custom renderer based on sam3.visualization_utils but with larger fonts and clearer labels.
+                """
+                # Normalize image to uint8
+                if img.dtype != np.uint8:
+                    # If float or uint16, normalize to 0-255
+                    img_min = img.min()
+                    img_max = img.max()
+                    if img_max > img_min:
+                        img = ((img - img_min) / (img_max - img_min) * 255.0).astype(
+                            np.uint8
+                        )
+                    else:
+                        img = np.zeros_like(img, dtype=np.uint8)
+
+                img = img[..., :3]  # drop alpha if present
+                height, width = img.shape[:2]
+                overlay = img.copy()
+
+                # CMAP for colors (simple list)
+                # mimic sam3.visualization_utils.COLORS or just use a fixed list
+                COLORS = [
+                    (255, 0, 0),
+                    (0, 255, 0),
+                    (0, 0, 255),
+                    (255, 255, 0),
+                    (0, 255, 255),
+                    (255, 0, 255),
+                    (128, 0, 0),
+                    (0, 128, 0),
+                    (0, 0, 128),
+                    (128, 128, 0),
+                    (0, 128, 128),
+                    (128, 0, 128),
+                ]
+
+                # 1. Draw Masks
+                for i in range(len(outputs["out_probs"])):
+                    obj_id = outputs["out_obj_ids"][i]
+                    color = COLORS[obj_id % len(COLORS)]
+                    # color is RGB, cv2 uses BGR usually, but we are working in RGB here (converted before call)
+
+                    mask = outputs["out_binary_masks"][i]
+                    if mask.shape != img.shape[:2]:
+                        mask = cv2.resize(
+                            mask.astype(np.float32),
+                            (width, height),
+                            interpolation=cv2.INTER_NEAREST,
+                        )
+
+                    mask_bool = mask > 0
+                    for c in range(3):
+                        overlay[..., c][mask_bool] = (
+                            alpha * color[c] + (1 - alpha) * overlay[..., c][mask_bool]
+                        ).astype(np.uint8)
+
+                # 2. Draw Boxes and Large Labels
+                for i in range(len(outputs["out_probs"])):
+                    box_xywh = outputs["out_boxes_xywh"][i]
+                    obj_id = outputs["out_obj_ids"][i]
+                    prob = outputs["out_probs"][i]
+                    color = COLORS[obj_id % len(COLORS)]
+
+                    x_rel, y_rel, w_rel, h_rel = box_xywh
+                    x1 = int(x_rel * width)
+                    y1 = int(y_rel * height)
+                    x2 = int((x_rel + w_rel) * width)
+                    y2 = int((y_rel + h_rel) * height)
+
+                    # Thicker box
+                    cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 3)
+
+                    # Label
+                    label = f"ID:{obj_id} | {prob:.2f}"
+                    font_scale = 1.0  # Larger font
+                    thickness = 2
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+
+                    # Text size
+                    (text_width, text_height), baseline = cv2.getTextSize(
+                        label, font, font_scale, thickness
+                    )
+
+                    # Text background box
+                    cv2.rectangle(
+                        overlay,
+                        (x1, y1 - text_height - 10),
+                        (x1 + text_width + 10, y1),
+                        color,
+                        -1,
+                    )
+
+                    # Text (White or Black depending on brightness? White is usually safe on colored box)
+                    cv2.putText(
+                        overlay,
+                        label,
+                        (x1 + 5, y1 - 5),
+                        font,
+                        font_scale,
+                        (255, 255, 255),
+                        thickness,
+                        cv2.LINE_AA,
+                    )
+
+                return overlay
+
+            # Render directly
+            img_rgb_vis = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            overlay = render_enhanced_masklet(img_rgb_vis, formatted_outputs, alpha=0.5)
+
+            # Convert back to BGR
+            img = cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)
 
         # Encode to Base64
-        _, buffer = cv2.imencode('.jpg', img)
-        img_base64 = base64.b64encode(buffer).decode('utf-8')
+        _, buffer = cv2.imencode(".jpg", img)
+        img_base64 = base64.b64encode(buffer).decode("utf-8")
 
-        # Cleanup temp file
-        if os.path.exists(file_path):
-             os.remove(file_path)
+        # Extract Polygons for Interactivity
+        polygons = []
+        scores_list = []
+        ids_list = []
+        height, width = img.shape[:2]
 
-        return {"status": "success", "image_base64": f"data:image/jpeg;base64,{img_base64}", "raw_count": len(result.get("masks", []))}
+        if "masks" in result:
+            H, W = height, width
+            for i, mask in enumerate(result["masks"]):
+                # Ensure numpy array
+                mask = np.array(mask)
+
+                # Handle shape (1, H, W) vs (H, W)
+                if mask.ndim == 3:
+                    mask = mask.squeeze()
+
+                # Ensure binary uint8
+                if mask.dtype != np.uint8:
+                    mask = (mask > 0).astype(np.uint8)
+
+                contours, _ = cv2.findContours(
+                    mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )
+
+                # Each mask might have multiple islands (contours)
+                mask_polys = []
+                for contour in contours:
+                    # contour is (N, 1, 2) -> (x, y)
+                    # Normalize and flatten to [[x,y], [x,y]]
+                    norm_poly = []
+                    for point in contour:
+                        x, y = point[0]
+                        # Clamp to 0-1
+                        nx = min(max(x / W, 0), 1)
+                        ny = min(max(y / H, 0), 1)
+                        norm_poly.append([nx, ny])
+                    # Simplify if too large?
+                    # For now keep all points but maybe check length
+                    if len(norm_poly) > 2:
+                        mask_polys.append(norm_poly)
+
+                polygons.append(mask_polys)
+
+                # Score
+                score = (
+                    float(result["scores"][i])
+                    if "scores" in result and i < len(result["scores"])
+                    else 1.0
+                )
+                scores_list.append(score)
+                ids_list.append(i)
+
+        return {
+            "status": "success",
+            "image_base64": f"data:image/jpeg;base64,{img_base64}",
+            "raw_count": len(result.get("masks", [])),
+            "polygons": polygons,  # List of List of List of [x,y] (Mask -> Contours -> Points)
+            "scores": scores_list,
+            "ids": ids_list,
+            "width": width,
+            "height": height,
+        }
     except Exception as e:
         import traceback
+
         traceback.print_exc()
         print(f"Inference Error: {str(e)}")
-        # Cleanup temp file
-        if 'file_path' in locals() and os.path.exists(file_path): # Changed temp_file_path to file_path to ensure correctness
-             os.remove(file_path)
-        raise HTTPException(status_code=500, detail=str(e))
 
+        raise HTTPException(status_code=500, detail=str(e))
