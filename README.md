@@ -1,41 +1,56 @@
 # SAM3 Dashboard & Full System Setup Guide
 
-This guide provides step-by-step instructions to set up the entire SAM3 environment, including the model, inference server, and client dashboard. This implementation aligns with the [SAM 3: Segment Anything with Concepts](../sam3/585895112_1502482260871702_2839727966936571770_n.pdf) paper specifications.
+This guide provides step-by-step instructions to set up the complete SAM3 environment, which consists of three main components: the dashboard (client & server), the SAM3 model, and the inference resources.
 
 ## Prerequisites
 
-- **OS**: Windows (as configured in scripts)
+- **OS**: Windows
 - **Python**: 3.10+ (Recommended 3.12+)
-- **Node.js**: 18+ (for client)
+- **Node.js**: 18+ (for client) or **Bun** (recommended)
 - **CUDA**: 12.6+ (for model inference on GPU)
 - **GPU**: NVIDIA GPU with sufficient VRAM (Optional, defaults to CPU if unavailable)
 
-## Project Structure
+---
 
-- `sam3/`: Core SAM 3 model implementation and training scripts.
-- `sam3-dashboard/server/`: FastAPI backend that interfaces with the SAM 3 model.
-- `sam3-dashboard/client/`: Next.js frontend for user interaction.
+## 1. Project Structure & Preparation
+
+To ensure all scripts work correctly, you must organize your project folder as follows. Create a main directory (e.g., `geospatial-deliniation`) and place the three required folders inside it:
+
+```text
+geospatial-deliniation/
+├── sam3/               # The modified SAM3 model code
+├── sam3-inference/     # Model weights and inference resources
+└── sam3-dashboard/     # This dashboard project (server & client)
+```
+
+### Component Details:
+
+1.  **sam3-dashboard**: This repository. Contains the UI and the API server.
+2.  **sam3**: The core model code.
+    - **Source**: [https://github.com/adityavhlvy/sam3](https://github.com/adityavhlvy/sam3)
+    - _Note: This is a modified version of the original SAM3 repo._
+3.  **sam3-inference**: Contains the model weights and checkpoints.
+    - **Source**: [https://huggingface.co/facebook/sam3](https://huggingface.co/facebook/sam3)
+    - _Action_: Download the files from Hugging Face and place them in this folder.
 
 ---
 
-## Part 1: Model Environment Setup (`sam3`)
+## 2. Setting up the SAM3 Model (`sam3`)
 
-The server relies on a specific Python environment located in `sam3/.venv`. We need to create this env and install the SAM 3 dependencies.
+The dashboard server relies on the Python environment created in this folder.
 
-1.  **Open a terminal** and navigate to the `sam3` directory:
+1.  **Open a terminal** and navigate to your `sam3` folder:
 
     ```powershell
     cd ..\sam3
     ```
 
-2.  **Create the Virtual Environment**:
-    Since `sam3-dashboard/server/start_server.bat` expects the venv at `sam3/.venv`, create it there:
+2.  **Create a Virtual Environment**:
+    It is critical to create the venv named `.venv` so the dashboard scripts can find it.
 
     ```powershell
     python -m venv .venv
     ```
-
-    _Note: If you are using Conda, you can create a prefix env:_ `conda create -p ./.venv python=3.12`
 
 3.  **Activate the Environment**:
 
@@ -43,30 +58,28 @@ The server relies on a specific Python environment located in `sam3/.venv`. We n
     .venv\Scripts\activate
     ```
 
-4.  **Install PyTorch (CUDA or CPU)**:
+4.  **Install PyTorch**:
 
     - **For CUDA (NVIDIA GPU)**:
       ```powershell
-      pip install torch==2.7.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+      pip install torch==2.5.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
       ```
     - **For CPU Only**:
       ```powershell
-      pip install torch==2.7.0 torchvision torchaudio
+      pip install torch==2.5.1 torchvision torchaudio
       ```
-      _Note: Inference on CPU will be significantly slower than on GPU._
 
 5.  **Install SAM 3 & Dependencies**:
     ```powershell
     pip install -e .
     pip install -e ".[notebooks,train]"
     ```
-    _This installs the package in editable mode as per the paper's repository instructions._
 
 ---
 
-## Part 2: Server Setup (`sam3-dashboard/server`)
+## 3. Setting up the Dashboard Server (`sam3-dashboard/server`)
 
-The server is a FastAPI application that loads the SAM 3 model and exposes endpoints for the dashboard.
+The server connects the UI to the SAM3 model.
 
 1.  **Navigate to the server directory**:
 
@@ -75,37 +88,27 @@ The server is a FastAPI application that loads the SAM 3 model and exposes endpo
     ```
 
 2.  **Install Server Dependencies**:
-    The server needs `fastapi`, `uvicorn`, etc. Ensure you are still in the `sam3` environment (or the script will handle it, but it's good to install deps manually first to be sure).
+    Ensure you are using the **same** virtual environment from the `sam3` folder.
 
     ```powershell
-    # Activate the sam3 venv if not already active
+    # Activate the sam3 venv
     ..\..\sam3\.venv\Scripts\activate
 
     # Install requirements
     pip install -r requirements.txt
     ```
 
-3.  **Run the Server**:
-    We have provided a convenience script `start_server.bat` that automatically uses the `sam3/.venv` Python interpreter.
-
+3.  **Start the Server**:
+    Use the provided script which automatically uses the correct python interpreter from `sam3/.venv`.
     ```powershell
     ./start_server.bat
     ```
-
-    _Expected Output:_
-
-    ```
-    Starting SAM3 Dashboard Server using VENV: ..\..\sam3\.venv\Scripts\python.exe
-    INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-    ```
-
-    The server API docs will be available at: [http://localhost:8000/docs](http://localhost:8000/docs)
+    - The server will run at `http://localhost:8000`.
+    - API Docs: `http://localhost:8000/docs`
 
 ---
 
-## Part 3: Client Setup (`sam3-dashboard/client`)
-
-The client is a modern Next.js 14+ application.
+## 4. Setting up the Client (`sam3-dashboard/client`)
 
 1.  **Open a new terminal** and navigate to the client directory:
 
@@ -119,6 +122,8 @@ The client is a modern Next.js 14+ application.
     bun install
     ```
 
+    _(If you don't have Bun, you can use `npm install`, but Bun is recommended)._
+
 3.  **Run the Development Server**:
 
     ```powershell
@@ -126,28 +131,19 @@ The client is a modern Next.js 14+ application.
     ```
 
 4.  **Access the Dashboard**:
-    Open your browser and go to: [http://localhost:3000](http://localhost:3000)
+    Open your browser and navigate to: [http://localhost:3000](http://localhost:3000)
 
 ---
 
-## usage
+## Usage Guide
 
-### 1. Dashboard Interface
+### Dashboard
 
-- **Inference Tab**: Upload images or videos to perform segmentation using SAM 3 concepts.
-- **Training Tab**: Trigger fine-tuning jobs. The server handles the execution of `sam3/train.py` scripts.
+- **Inference**: Upload images/videos. The system checks `sam3-inference` for model weights.
+- **Training**: Trigger fine-tuning. The server executes scripts located in `sam3/train.py`.
 
-### 2. Model Configuration
+### Troubleshooting
 
-The system uses the configuration files located in `sam3/configs/`. Ensure your dataset paths in these configs are correct before triggering training tasks.
-
-### 3. Monitoring
-
-- **TensorBoard**: TensorBoard logs are saved to `sam3-inference/tensorboard` (or as configured).
-- **Server Logs**: Check the server terminal for real-time inference logs.
-
-## Troubleshooting
-
-- **Server fails to find `sam3` module**: Ensure you ran `pip install -e .` inside the `sam3` directory using the `.venv` python.
-- **CUDA errors**: Verify you installed the correct PyTorch version compatible with your GPU drivers (CUDA 12.6+).
-- **Client API errors**: Ensure the server is running on port 8000 and CORS is enabled (default is enabled for `*`).
+- **"Module not found: sam3"**: Make sure you ran `pip install -e .` inside the `sam3` folder while the `.venv` was active.
+- **CUDA Errors**: Verify your GPU driver version matches the installed PyTorch CUDA version.
+- **Paths**: Ensure `sam3`, `sam3-inference`, and `sam3-dashboard` are all side-by-side in the same parent directory.
