@@ -1,1 +1,3 @@
 server/data/datasets/bangkalan_19/
+__pycache__/
+*.pyc
