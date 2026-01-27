@@ -21,6 +21,15 @@ sam3_root = os.path.abspath(os.path.join(current_dir, "..", "..", "sam3"))
 if sam3_root not in sys.path:
     sys.path.append(sam3_root)
 
+# Init DB
+from data.database import engine, Base
+
+# Import models to register them
+import data.models
+
+Base.metadata.create_all(bind=engine)
+
+
 # Import Routers
 # logic to handle imports if run from inside server/
 try:
