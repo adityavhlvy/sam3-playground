@@ -3,3 +3,7 @@ uvicorn
 python-multipart
 websockets
 tensorboard
+sqlalchemy
+numpy<2
+opencv-python-headless
+tifffile
