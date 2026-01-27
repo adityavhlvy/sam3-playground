@@ -5,7 +5,7 @@ This guide provides step-by-step instructions to set up the complete SAM3 enviro
 ## Prerequisites
 
 - **OS**: Windows
-- **Python**: 3.10+ (Recommended 3.12+)
+- **Python**: 3.14+
 - **Node.js**: 18+ (for client) or **Bun** (recommended)
 - **CUDA**: 12.6+ (for model inference on GPU)
 - **GPU**: NVIDIA GPU with sufficient VRAM (Optional, defaults to CPU if unavailable)
