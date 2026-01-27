@@ -17,9 +17,21 @@ if not os.path.exists(UPLOAD_DIR):
 
 @router.post("/predict/image")
 async def predict_image_endpoint(
-    image: UploadFile = File(...), prompt: str = Form(None)
+    image: UploadFile = File(...),
+    prompt: str = Form(None),
+    boxes: str = Form(None),
+    points: str = Form(None),
+    point_labels: str = Form(None),
+    task_type: str = Form("auto"),  # auto, search, interactive, exemplar
 ):
     try:
+        import json
+
+        # Parse JSON fields
+        boxes_data = json.loads(boxes) if boxes else None
+        points_data = json.loads(points) if points else None
+        point_labels_data = json.loads(point_labels) if point_labels else None
+
         # Read image
         contents = await image.read()
         nparr = np.frombuffer(contents, np.uint8)
@@ -92,7 +104,14 @@ async def predict_image_endpoint(
 
         # Run Inference
         # Model Service will handle loading the model if not loaded
-        result = model_service.predict_image(img, prompt)
+        result = model_service.predict_image(
+            img,
+            prompt_text=prompt,
+            boxes=boxes_data,
+            points=points_data,
+            point_labels=point_labels_data,
+            task_type=task_type,
+        )
         print(f"DEBUG: Inference Result Keys: {result.keys()}")
         if "masks" in result:
             print(f"DEBUG: Number of masks found: {len(result['masks'])}")
@@ -229,52 +248,9 @@ async def predict_image_endpoint(
                         ).astype(np.uint8)
 
                 # 2. Draw Boxes and Large Labels
-                for i in range(len(outputs["out_probs"])):
-                    box_xywh = outputs["out_boxes_xywh"][i]
-                    obj_id = outputs["out_obj_ids"][i]
-                    prob = outputs["out_probs"][i]
-                    color = COLORS[obj_id % len(COLORS)]
-
-                    x_rel, y_rel, w_rel, h_rel = box_xywh
-                    x1 = int(x_rel * width)
-                    y1 = int(y_rel * height)
-                    x2 = int((x_rel + w_rel) * width)
-                    y2 = int((y_rel + h_rel) * height)
-
-                    # Thicker box
-                    cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 3)
-
-                    # Label
-                    label = f"ID:{obj_id} | {prob:.2f}"
-                    font_scale = 1.0  # Larger font
-                    thickness = 2
-                    font = cv2.FONT_HERSHEY_SIMPLEX
-
-                    # Text size
-                    (text_width, text_height), baseline = cv2.getTextSize(
-                        label, font, font_scale, thickness
-                    )
-
-                    # Text background box
-                    cv2.rectangle(
-                        overlay,
-                        (x1, y1 - text_height - 10),
-                        (x1 + text_width + 10, y1),
-                        color,
-                        -1,
-                    )
-
-                    # Text (White or Black depending on brightness? White is usually safe on colored box)
-                    cv2.putText(
-                        overlay,
-                        label,
-                        (x1 + 5, y1 - 5),
-                        font,
-                        font_scale,
-                        (255, 255, 255),
-                        thickness,
-                        cv2.LINE_AA,
-                    )
+                # REMOVED: Boxes and Labels are now handled by the frontend
+                # for i in range(len(outputs["out_probs"])):
+                #     ...
 
                 return overlay
 
@@ -293,6 +269,24 @@ async def predict_image_endpoint(
         polygons = []
         scores_list = []
         ids_list = []
+        colors_list = []  # New: Return colors
+        
+        # Consistent Color Map (Same as in render_enhanced_masklet)
+        COLORS = [
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+            (255, 255, 0),
+            (0, 255, 255),
+            (255, 0, 255),
+            (128, 0, 0),
+            (0, 128, 0),
+            (0, 0, 128),
+            (128, 128, 0),
+            (0, 128, 128),
+            (128, 0, 128),
+        ]
+
         height, width = img.shape[:2]
 
         if "masks" in result:
@@ -340,6 +334,10 @@ async def predict_image_endpoint(
                 )
                 scores_list.append(score)
                 ids_list.append(i)
+                
+                # Color (RGB)
+                color = COLORS[i % len(COLORS)]
+                colors_list.append(color)
 
         return {
             "status": "success",
@@ -348,6 +346,7 @@ async def predict_image_endpoint(
             "polygons": polygons,  # List of List of List of [x,y] (Mask -> Contours -> Points)
             "scores": scores_list,
             "ids": ids_list,
+            "colors": colors_list, # New field
             "width": width,
             "height": height,
         }
@@ -358,3 +357,76 @@ async def predict_image_endpoint(
         print(f"Inference Error: {str(e)}")
 
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/utils/preview_image")
+async def preview_image_endpoint(image: UploadFile = File(...)):
+    """
+    Convert an uploaded image (e.g. TIFF) to a browser-friendly format (JPEG/PNG) base64 string.
+    Robust handling for multi-channel and 16-bit TIFFs.
+    """
+    try:
+        contents = await image.read()
+        
+        # Method 1: Try OpenCV first (fastest)
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED) # Use UNCHANGED to keep depth/channels
+
+        # If OpenCV fails or returns None
+        if img is None:
+             print("OpenCV decode failed, trying PIL...")
+             from PIL import Image
+             import io
+             try:
+                 pil_img = Image.open(io.BytesIO(contents))
+                 img = np.array(pil_img)
+                 # Handle RGBA to RGB if needed, or other modes
+                 if len(img.shape) == 3 and img.shape[2] == 4:
+                     img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
+                 elif len(img.shape) == 2:
+                     # Grayscale to RGB
+                     img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+                 # PIL is RGB, OpenCV expects BGR
+                 img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+             except Exception as pilot_err:
+                 print(f"PIL failed too: {pilot_err}")
+                 raise HTTPException(status_code=400, detail="Could not decode image")
+
+        # --- Normalization and Channel Handling ---
+        
+        # 1. Handle Dimensions (H, W, C)
+        if len(img.shape) == 2:
+            # (H, W) -> (H, W, 3)
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        elif len(img.shape) == 3:
+            if img.shape[2] > 3:
+                # Take first 3 channels if > 3 (e.g. multispectral)
+                img = img[:, :, :3]
+            elif img.shape[2] == 1:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+        # 2. Handle Bit Depth (uint16 -> uint8)
+        if img.dtype == np.uint16 or img.max() > 255:
+            # Normalize to 0-255
+            img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX)
+            img = np.uint8(img)
+        elif img.dtype == np.float32 or img.dtype == np.float64:
+             img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX)
+             img = np.uint8(img)
+
+        # Encode as JPEG
+        success, buffer = cv2.imencode(".jpg", img)
+        if not success:
+            raise ValueError("Failed to encode image to JPEG")
+            
+        img_str = base64.b64encode(buffer).decode("utf-8")
+        image_base64 = f"data:image/jpeg;base64,{img_str}"
+        
+        return JSONResponse(content={"image_base64": image_base64, "width": img.shape[1], "height": img.shape[0]})
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"Error in preview_image_endpoint: {str(e)}")
+        return JSONResponse(status_code=500, content={"message": str(e)})
