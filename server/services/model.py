@@ -133,6 +133,9 @@ class ModelService:
 
         print(f"DEBUG: ModelService task_type resolved to: {task_type}")
 
+        # Initialize output to None to avoid UnboundLocalError
+        output = None
+
         # --- MODE 1: PCS (Promptable Concept Segmentation) - Search / Exemplar ---
         if task_type in ["search", "exemplar"]:
              # This mode primarily uses Sam3Processor set_text_prompt and add_geometric_prompt
@@ -142,7 +145,7 @@ class ModelService:
              # 1. Text Prompt
              if prompt_text:
                  output = self.image_processor.set_text_prompt(
-                     state=inference_state, prompt=prompt_text
+                     prompt_text, inference_state  # Correct argument order: prompt first, then state
                  )
                  # Output is updated in state, but also returned
              
@@ -180,14 +183,57 @@ class ModelService:
                  if "scores" in output:
                      scores = output["scores"]
                  
-                 # tensor to list
+                 # Extensive debug logging
                  if isinstance(masks, torch.Tensor):
+                     print(f"DEBUG: Raw mask tensor shape: {masks.shape}, dtype: {masks.dtype}")
+                     # Check if tensor is empty (0 detections)
+                     if masks.numel() == 0:
+                         print("DEBUG: Empty mask tensor (0 detections)")
+                         return {"masks": [], "boxes": [], "scores": []}
+                     # Check if any True values exist
+                     true_count = masks.sum().item()
+                     print(f"DEBUG: Total True/1 values in masks tensor: {true_count}")
+                     print(f"DEBUG: Mask tensor min: {masks.min().item()}, max: {masks.max().item()}")
+                 
+                 if isinstance(scores, torch.Tensor):
+                     print(f"DEBUG: Scores tensor shape: {scores.shape}, values: {scores.tolist()[:5]}...")  # First 5 scores
+                 elif scores:
+                     print(f"DEBUG: Scores: {scores[:5] if len(scores) > 5 else scores}...")
+                 else:
+                     print(f"DEBUG: No scores returned!")
+                 
+                 # tensor to list - squeeze out the channel dimension if present
+                 if isinstance(masks, torch.Tensor):
+                     # Convert boolean tensor to int (0/1) for storage clarity
+                     if masks.dtype == torch.bool:
+                         masks = masks.int()
+                     # Squeeze out the channel dimension: [N, 1, H, W] -> [N, H, W]
+                     if masks.dim() == 4 and masks.shape[1] == 1:
+                         masks = masks.squeeze(1)
+                         print(f"DEBUG: Squeezed mask shape: {masks.shape}")
                      masks = masks.tolist()
                  if isinstance(boxes_out, torch.Tensor):
                      boxes_out = boxes_out.tolist()
                  if isinstance(scores, torch.Tensor):
                      scores = scores.tolist()
-
+                 
+                 # Validate masks - check if mask has any True/1 values
+                 if masks:
+                     print(f"DEBUG: Number of masks: {len(masks)}")
+                     # Check if first mask has any positive values
+                     def has_positive_values(mask):
+                         if isinstance(mask, list):
+                             if len(mask) == 0:
+                                 return False
+                             if isinstance(mask[0], list):
+                                 return any(has_positive_values(m) for m in mask)
+                             return any(v > 0 if isinstance(v, (int, float)) else v for v in mask)
+                         return mask > 0 if isinstance(mask, (int, float)) else mask
+                     
+                     if not has_positive_values(masks[0] if masks else []):
+                         print(f"[WARNING] Mask appears empty (all zeros/false)")
+                 else:
+                     print(f"[WARNING] No masks detected for prompt: {prompt_text}")
         # --- MODE 2: PVS (Promptable Visual Segmentation) - Interactive (Tracker) ---
         elif task_type == "interactive":
             # This uses predict_inst (model.predict_inst -> SAM3InteractiveImagePredictor)

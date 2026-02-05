@@ -38,6 +38,7 @@ try:
     from api.data_engine import router as data_engine_router
     from api.dataset import router as dataset_router
     from api.system import router as system_router
+    from api.evaluate import router as evaluate_router
 except ImportError:
     # Try adding server dir to path
     if current_dir not in sys.path:
@@ -47,6 +48,7 @@ except ImportError:
     from api.data_engine import router as data_engine_router
     from api.dataset import router as dataset_router
     from api.system import router as system_router
+    from api.evaluate import router as evaluate_router
 
 # Include Routers
 app.include_router(train_router, prefix="/api/train", tags=["Training"])
@@ -54,6 +56,7 @@ app.include_router(inference_router, prefix="/api/inference", tags=["Inference"]
 app.include_router(data_engine_router, prefix="/api/data-engine", tags=["Data Engine"])
 app.include_router(dataset_router, prefix="/api/dataset", tags=["Dataset"])
 app.include_router(system_router, prefix="/api/system", tags=["System"])
+app.include_router(evaluate_router, prefix="/api/evaluate", tags=["Evaluation"])
 
 
 @app.get("/")

@@ -1,3 +1,29 @@
+# Datasets
 server/data/datasets/bangkalan_19/
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+.venv/
+venv/
+
+# Database files
+*.db
+server/data/storage/
+
+# Node
+client/node_modules/
+client/.next/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Uploads (runtime generated)
+server/uploads/
+
+# OS
+.DS_Store
+Thumbs.db

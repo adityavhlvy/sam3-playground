@@ -1,7 +1,11 @@
 from fastapi import APIRouter
+from fastapi.responses import FileResponse, Response
 import torch
 import psutil
 import platform
+import os
+import io
+from PIL import Image, ImageOps
 
 import tkinter as tk
 from tkinter import filedialog
@@ -81,3 +85,44 @@ def get_system_info():
         "ram_usage": ram_usage,
         "platform": platform.system()
     }
+
+@router.get("/file/{file_path:path}")
+def serve_file(file_path: str):
+    """
+    Serves a local file. Converts TIF to PNG on fly for browser preview.
+    Handles EXIF orientation.
+    """
+    if not os.path.exists(file_path):
+        return {"error": "File not found"}
+
+    # Special handling for TIFF and JPG (to fix rotation)
+    if file_path.lower().endswith(('.tif', '.tiff', '.jpg', '.jpeg')):
+        try:
+            # Use PIL to read and convert
+            Image.MAX_IMAGE_PIXELS = None 
+            
+            with Image.open(file_path) as img:
+                # Handle EXIF Orientation (Fix "tilted" or rotated images)
+                img = ImageOps.exif_transpose(img)
+
+                # Convert to RGB (handle CMYK or Grayscale TIFs)
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                
+                # Resize if HUGE to prevent slow transfer (optional, but good for preview)
+                max_dim = 2000
+                if max(img.size) > max_dim:
+                    img.thumbnail((max_dim, max_dim))
+
+                # Save to buffer as PNG
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                buf.seek(0)
+                
+                return Response(content=buf.getvalue(), media_type="image/png")
+        except Exception as e:
+            # Fallback to serving raw file if conversion/transpose fails
+            return FileResponse(file_path)
+
+    # Default for other files
+    return FileResponse(file_path)

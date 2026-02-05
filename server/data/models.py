@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Text,
+    Index,
 )
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -28,7 +29,7 @@ class MaskProposal(Base):
     __tablename__ = "mask_proposals"
 
     id = Column(Integer, primary_key=True, index=True)
-    image_id = Column(Integer, ForeignKey("image_items.id"))
+    image_id = Column(Integer, ForeignKey("image_items.id"), index=True)  # Add index
 
     prompt_text = Column(String)
     prompt_type = Column(String)  # txt, click, box
@@ -39,7 +40,7 @@ class MaskProposal(Base):
 
     score = Column(Integer)  # Confidence score 0-100
 
-    status = Column(String, default="pending")  # pending, accepted, rejected, edited
+    status = Column(String, default="pending", index=True)  # Add index for faster queries
 
     is_exhaustive = Column(
         Boolean, default=False
@@ -48,3 +49,9 @@ class MaskProposal(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     image = relationship("ImageItem", back_populates="proposals")
+
+    # Composite index for common query patterns
+    __table_args__ = (
+        Index('idx_proposal_status_image', 'status', 'image_id'),
+    )
+

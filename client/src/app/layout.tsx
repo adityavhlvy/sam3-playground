@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 import localFont from "next/font/local";
 import "./globals.css";
 import Link from "next/link";
-import { BrainCircuit, SquareActivity, Database, LayoutDashboard } from "lucide-react";
+import { BrainCircuit, SquareActivity, Database, LayoutDashboard, BarChart3 } from "lucide-react";
 import SystemStatus from "@/components/SystemStatus";
 
 export const metadata: Metadata = {
@@ -58,6 +58,9 @@ export default function RootLayout({
               </li>
               <li>
                 <Link href="/data-engine" className="font-medium text-lg"><Database className="w-5 h-5" /> Data Engine</Link>
+              </li>
+              <li>
+                <Link href="/evaluate" className="font-medium text-lg"><BarChart3 className="w-5 h-5" /> Evaluation</Link>
               </li>
               <li>
                 <Link href="/dataset" className="font-medium text-lg"><SquareActivity className="w-5 h-5" /> Datasets</Link>

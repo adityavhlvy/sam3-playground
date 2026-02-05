@@ -22,16 +22,18 @@ interface AnnotationCanvasProps {
   onPointsChange?: (points: Point[]) => void;
   onBoxesChange?: (boxes: Box[]) => void;
   interactionMode?: "point" | "box";
-  width?: number;
-  height?: number;
-  points?: Point[];
-  boxes?: Box[];
+  width?: number; // Treated as MAX width
+  height?: number; // Treated as MAX height
+  masks?: any[]; // RLE or raw mask objects
+  points?: Point[]; // Point annotations
+  boxes?: Box[]; // Box annotations
 }
 
 export function AnnotationCanvas({
   imageUrl,
   polygons,
   colors,
+  masks,
   onPointsChange,
   onBoxesChange,
   interactionMode = "point",
@@ -46,13 +48,34 @@ export function AnnotationCanvas({
   const [startPos, setStartPos] = useState<{ x: number; y: number } | null>(null);
   const [currentBox, setCurrentBox] = useState<Box | null>(null);
 
+  // Dynamic canvas dimensions based on image aspect ratio
+  const [canvasDim, setCanvasDim] = useState({ w: width, h: height });
+
   // Load image
   useEffect(() => {
     const image = new Image();
     image.src = imageUrl;
     image.crossOrigin = "anonymous";
-    image.onload = () => setImg(image);
-  }, [imageUrl]);
+    image.onload = () => {
+      // Calculate aspect-correct dims that fit within width/height props
+      if (image.naturalWidth === 0 || image.naturalHeight === 0) return;
+
+      const ratio = image.naturalWidth / image.naturalHeight;
+
+      // Try fitting to width first
+      let newW = width;
+      let newH = width / ratio;
+
+      // If height is too big, fit to height
+      if (newH > height) {
+        newH = height;
+        newW = height * ratio;
+      }
+
+      setCanvasDim({ w: newW, h: newH });
+      setImg(image);
+    };
+  }, [imageUrl, width, height]);
 
   // Draw canvas
   useEffect(() => {
@@ -63,37 +86,106 @@ export function AnnotationCanvas({
     if (!ctx) return;
 
     // Clear
-    ctx.clearRect(0, 0, width, height);
+    ctx.clearRect(0, 0, canvasDim.w, canvasDim.h);
 
     // Draw Image
-    // Maintain aspect ratio or stretch? The parent controls size usually.
-    // For simplicity here, we assume the canvas size matches the display size of the image desired.
-    // If width/height are fixed, we stretch.
-    ctx.drawImage(img, 0, 0, width, height);
+    // Use calculated dimensions to preserve aspect ratio
+    ctx.drawImage(img, 0, 0, canvasDim.w, canvasDim.h);
 
-    // Draw Points
-    points.forEach((p) => {
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 5, 0, 2 * Math.PI);
-      ctx.fillStyle = p.label === 1 ? "#00ff00" : "#ff0000"; // Green for pos, Red for neg
-      ctx.fill();
-      ctx.strokeStyle = "white";
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    });
+    // Draw Bitmasks/RLE (New Support for Phase 2 Visualization)
+    if (masks && masks.length > 0) {
+      console.log("[AnnotationCanvas] Rendering masks, count:", masks.length);
+      console.log("[AnnotationCanvas] First mask type:", typeof masks[0], Array.isArray(masks[0]) ? "isArray" : "notArray");
 
-    // Draw Boxes
-    boxes.forEach((b) => {
-      ctx.beginPath();
-      ctx.rect(b.x, b.y, b.w, b.h);
-      ctx.strokeStyle = b.label === 1 ? "#00ff00" : "#ff0000";
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      ctx.fillStyle = b.label === 1 ? "rgba(0, 255, 0, 0.2)" : "rgba(255, 0, 0, 0.2)";
-      ctx.fill();
-    });
+      masks.forEach((maskObj) => {
+        // 1. If it's a raw RLE object (counts/size) or boolean array
+        // Ideally we decode RLE to canvas, but for speed we might render a simple overlay
+        // if it's already decoded.
 
-    // Draw Polygons
+        // Simple fallback: If mask is a Polygon (list of points), draw it.
+        // If mask is SAM output... SAM returns RLE usually.
+
+        // For now, let's assume the backend passes 'segmentation' which IS the RLE/Mask.
+        // Decoding RLE in JS is heavy. Ideally backend sends polygons.
+        // BUT: If the mask is coming from 'generate_proposals', it might be RLE.
+
+        // Hack: Visualizing RLE on client without library is hard.
+        // We will rely on "polygons" if available.
+        // If "masks" is passed, we check if it has a polygon representation?
+        // Or we just try to draw it if it's a list of points.
+      });
+
+      // Actually, let's use a simpler approach:
+      // If we want to visualize generated masks, we should convert them to Polygons on SERVER
+      // OR render them as a semitransparent overlay Image if possible.
+      // Current 'masks' prop is likely RLE.
+
+      // To fix this quickly without huge dependencies:
+      // We will fallback to NOT determining precise shape if RLE.
+      // But wait! SAM3 'predict_image' returns 'masks' as RLE? 
+      // Let's check model.py... it returns lists (boolean arrays converted to list).
+
+      // If it's a BOOlean array (0/1) list of lists:
+      // We can draw it!
+      // But it's 2D array. Iterating pixels in JS is slow.
+
+      // Detect nesting level to handle 2D (H,W) or 3D (1,H,W) / (N,H,W)
+      let mask2D = masks[0];
+
+      console.log("[AnnotationCanvas] mask2D initial:", Array.isArray(mask2D) ? `Array[${mask2D.length}]` : typeof mask2D);
+
+      // Safety check: deeply nested?
+      if (Array.isArray(mask2D) && mask2D.length > 0) {
+        console.log("[AnnotationCanvas] mask2D[0] type:", typeof mask2D[0], Array.isArray(mask2D[0]) ? `Array[${mask2D[0].length}]` : "notArray");
+        if (Array.isArray(mask2D[0]) && mask2D[0].length > 0) {
+          console.log("[AnnotationCanvas] mask2D[0][0] type:", typeof mask2D[0][0], Array.isArray(mask2D[0][0]) ? `Array[${mask2D[0][0].length}]` : "notArray");
+          if (Array.isArray(mask2D[0][0])) {
+            // It's 3D: [Channel][Row][Col] -> Take first channel
+            console.log("[AnnotationCanvas] Detected 3D mask, flattening...");
+            mask2D = mask2D[0];
+          }
+        }
+      }
+
+      if (Array.isArray(mask2D) && Array.isArray(mask2D[0])) {
+        const mH = mask2D.length;
+        const mW = mask2D[0].length;
+        console.log("[AnnotationCanvas] Mask dimensions: H=", mH, "W=", mW);
+
+        // Create offscreen canvas to scale mask to image size
+        const offCanvas = document.createElement('canvas');
+        offCanvas.width = mW;
+        offCanvas.height = mH;
+        const offCtx = offCanvas.getContext('2d');
+        if (offCtx) {
+          const imgData = offCtx.createImageData(mW, mH);
+          let pixelCount = 0;
+          for (let r = 0; r < mH; r++) {
+            for (let c = 0; c < mW; c++) {
+              // Support boolean (false/true) or number (0/1)
+              const val = mask2D[r][c];
+              if (val === true || val > 0) { // Thresh
+                const idx = (r * mW + c) * 4;
+                imgData.data[idx] = 0;     // R
+                imgData.data[idx + 1] = 255; // G (Green)
+                imgData.data[idx + 2] = 0;   // B
+                imgData.data[idx + 3] = 100; // Alpha
+                pixelCount++;
+              }
+            }
+          }
+          console.log("[AnnotationCanvas] Positive pixels:", pixelCount, "out of", mH * mW);
+          offCtx.putImageData(imgData, 0, 0);
+
+          // Draw scaled to fit main canvas
+          ctx.drawImage(offCanvas, 0, 0, canvasDim.w, canvasDim.h);
+        }
+      } else {
+        console.log("[AnnotationCanvas] mask2D is not a 2D array, cannot render");
+      }
+    }
+
+    // Draw Polygons (Existing logic)
     if (polygons) {
       polygons.forEach((objectPolys, objIdx) => {
         const color =
@@ -113,9 +205,10 @@ export function AnnotationCanvas({
         objectPolys.forEach((contour) => {
           if (contour.length < 2) return;
           ctx.beginPath();
-          ctx.moveTo(contour[0][0] * width, contour[0][1] * height);
+          // Use canvasDim instead of props for normalization
+          ctx.moveTo(contour[0][0] * canvasDim.w, contour[0][1] * canvasDim.h);
           for (let i = 1; i < contour.length; i++) {
-            ctx.lineTo(contour[i][0] * width, contour[i][1] * height);
+            ctx.lineTo(contour[i][0] * canvasDim.w, contour[i][1] * canvasDim.h);
           }
           ctx.closePath();
           ctx.fill();
@@ -135,7 +228,7 @@ export function AnnotationCanvas({
       ctx.setLineDash([]);
     }
 
-  }, [img, points, boxes, currentBox, width, height, polygons, colors]);
+  }, [img, points, boxes, currentBox, canvasDim, polygons, colors, masks]); // Added masks to deps
 
   const getMousePos = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -192,11 +285,15 @@ export function AnnotationCanvas({
   };
 
   return (
-    <div className="relative border border-base-300 rounded-lg overflow-hidden inline-block bg-black">
+    <div
+      className="relative border border-base-300 rounded-lg overflow-hidden bg-black flex justify-center items-center"
+      // Container maintains the MAX size but centers the canvas
+      style={{ width: width, height: height, display: 'flex' }}
+    >
       <canvas
         ref={canvasRef}
-        width={width}
-        height={height}
+        width={canvasDim.w}
+        height={canvasDim.h}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
