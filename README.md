@@ -345,16 +345,43 @@ Client will run at: **http://localhost:3000**
 
 ## 🖱️ Polygon Editor Shortcuts
 
+### Mode Shortcuts
 | Key | Action |
 |-----|--------|
-| `Delete` / `Backspace` | Delete selected vertex |
+| `V` / `1` | Select mode |
+| `E` / `2` | Edit mode (vertex editing) |
+| `H` / `3` | Pan mode |
+| `D` / `4` | Draw mode |
+
+### Productivity Shortcuts
+| Key | Action |
+|-----|--------|
+| `Space` | Save and proceed to next image |
+| `N` | Skip to next image (without saving) |
+| `Q` | Quick simplify all polygons |
+| `A` | Select all polygons |
+| `S` | Open simplify modal (when selected) |
+
+### Editing Shortcuts
+| Key | Action |
+|-----|--------|
+| `Delete` / `Backspace` | Delete selected polygon or vertex (in edit mode) |
+| `Ctrl + Z` | Undo |
+| `Ctrl + Shift + Z` / `Ctrl + Y` | Redo |
+| `Ctrl + S` | Save |
 | `Ctrl + A` | Select all polygons |
-| `S` | Simplify selected polygon |
-| `Ctrl + S` | Simplify all polygons |
-| `D` | Delete selected polygon |
+| `Enter` | Finish drawing (in draw mode) |
+| `Escape` | Deselect / cancel |
+
+### Zoom & Navigation
+| Key | Action |
+|-----|--------|
 | `+` / `=` | Zoom in |
 | `-` | Zoom out |
-| Mouse Scroll | Zoom in/out |
+| `0` | Reset view (100%) |
+| `Ctrl + Scroll` | Pinch zoom (touchpad) |
+| `Two-finger scroll` | Pan (touchpad) |
+| `Right-click` (edit mode) | Delete hovered vertex |
 
 ---
 
