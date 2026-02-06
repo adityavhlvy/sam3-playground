@@ -7,7 +7,7 @@ import shutil
 import random
 import cv2
 import numpy as np
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from pycocotools import mask as mask_util
@@ -16,6 +16,7 @@ from data.models import MaskProposal, ImageItem
 from services.model import model_service
 from services.verifier import get_verifier
 from services.preprocessing import preprocessing_service
+from services.postprocessing import polygon_processor
 
 router = APIRouter()
 
@@ -60,6 +61,13 @@ class PolygonUpdateRequest(BaseModel):
     """Request model for updating proposal mask from PolygonEditor."""
     proposal_id: int
     polygons: List[List[List[float]]]  # [[[x, y], [x, y], ...], ...] normalized 0-1
+
+
+class ProcessMasksRequest(BaseModel):
+    masks: List[Any]  # List of RLE or raw arrays
+    clean: bool = True
+    snap: bool = True
+    min_area: int = 20
 
 
 @router.get("/items")
@@ -193,28 +201,11 @@ def get_verification_queue(dataset_path: str, limit: int = 1, offset: int = 0, d
                         # Legacy raw array format
                         mask = np.array(mask_data)
                     
-                    # Handle 3D mask (1, H, W) -> (H, W)
                     if mask.ndim == 3:
                         mask = mask.squeeze()
                     
-                    # Ensure binary uint8
-                    if mask.dtype != np.uint8:
-                        mask = (mask > 0).astype(np.uint8)
-                    
-                    H, W = mask.shape[:2]
-                    
-                    # Find contours and convert to normalized polygons
-                    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    
-                    for contour in contours:
-                        norm_poly = []
-                        for point in contour:
-                            x, y = point[0]
-                            nx = min(max(x / W, 0), 1)
-                            ny = min(max(y / H, 0), 1)
-                            norm_poly.append([nx, ny])
-                        if len(norm_poly) > 2:
-                            polygons_for_mask.append(norm_poly)
+                    # Apply smoothing for better visualization
+                    polygons_for_mask = polygon_processor.mask_to_polygons(mask, smooth_iterations=1)
                 
                 except Exception as e:
                     print(f"[QUEUE] Proposal {p.id}: polygon conversion failed: {e}")
@@ -279,24 +270,22 @@ def get_flagged_queue(db: Session = Depends(get_db)):
             
             if mask_data:
                 try:
-                    mask = np.array(mask_data)
-                    if mask.ndim == 3:
-                        mask = mask.squeeze()
-                    if mask.dtype != np.uint8:
-                        mask = (mask > 0).astype(np.uint8)
+                    # Handle RLE
+                    mask = None
+                    if isinstance(mask_data, dict) and 'rle' in mask_data:
+                        rle = mask_data['rle']
+                        if isinstance(rle['counts'], str):
+                             rle = {'counts': rle['counts'].encode('utf-8'), 'size': rle['size']}
+                        mask = mask_util.decode(rle)
+                    else:
+                        mask = np.array(mask_data)
                     
-                    H, W = mask.shape[:2]
-                    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    
-                    for contour in contours:
-                        norm_poly = []
-                        for point in contour:
-                            x, y = point[0]
-                            nx = min(max(x / W, 0), 1)
-                            ny = min(max(y / H, 0), 1)
-                            norm_poly.append([nx, ny])
-                        if len(norm_poly) > 2:
-                            polygons_for_mask.append(norm_poly)
+                    if mask is not None:
+                        if mask.ndim == 3:
+                            mask = mask.squeeze()
+
+                        # Apply smoothing for better visualization
+                        polygons_for_mask = polygon_processor.mask_to_polygons(mask, smooth_iterations=1)
                 except Exception as e:
                     print(f"[FLAGGED_QUEUE] Proposal {p.id}: polygon conversion failed: {e}")
             
@@ -429,6 +418,133 @@ def generate_proposals(
         return {"proposals": result}
     except Exception as e:
         print(f"[ERROR] Generate failed on {item_path}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+class SnapPolygonsRequest(BaseModel):
+    image_id: str
+    proposals: Dict[int, List[List[List[float]]]]  # proposal_id -> polygons
+    width: int
+    height: int
+
+@router.post("/snap_polygons")
+def snap_polygons_endpoint(req: SnapPolygonsRequest, db: Session = Depends(get_db)):
+    """
+    On-demand snapping for Phase 3. 
+    Receives current polygons, rasterizes them, snaps using Voronoi, and returns new polygons.
+    """
+    try:
+        from services.postprocessing import polygon_processor
+        import cv2
+        import numpy as np
+
+        H, W = req.height, req.width
+        
+        # 1. Rasterize
+        # We need ordered list of masks to snap
+        # Map: index -> proposal_id
+        proposal_ids = list(req.proposals.keys())
+        masks_list = []
+        
+        for pid in proposal_ids:
+            polys = req.proposals[pid]
+            mask = np.zeros((H, W), dtype=np.uint8)
+            
+            # Fill polygons
+            # polygons are normalized 0-1. Scale to W, H
+            for poly in polys:
+                pts = np.array(poly)
+                pts[:, 0] *= W
+                pts[:, 1] *= H
+                pts = pts.astype(np.int32)
+                cv2.fillPoly(mask, [pts], 1)
+            
+            masks_list.append(mask)
+            
+        # 2. Snap
+        # Use reasonable default ratio (e.g. 2% of diagonal) for magnetic snap
+        snapped_masks = polygon_processor.snap_masks(masks_list, max_snap_dist_ratio=0.03)
+        
+        # 3. Polygonize back
+        snapped_proposals = {}
+        for idx, mask in enumerate(snapped_masks):
+            pid = proposal_ids[idx]
+            if mask is None: 
+                snapped_proposals[pid] = []
+                continue
+                
+            # Apply smoothing (Chaikin) + simplifies (DP)
+            # Micro-epsilon (0.0002) to strictly preserve shape details (High Fidelity)
+            new_polys = polygon_processor.mask_to_polygons(mask, epsilon_factor=0.0002, smooth_iterations=0)
+            snapped_proposals[pid] = new_polys
+            
+        # 4. Weld Topology (Spiderweb Connectivity)
+        # Ensure vertices of adjacent polygons share exact coordinates
+        snapped_proposals = polygon_processor.weld_polygons(snapped_proposals, weld_threshold_pixels=5.0)
+            
+        return {"proposals": snapped_proposals}
+            
+    except Exception as e:
+        print(f"[SNAP] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/process_masks")
+def process_masks_endpoint(req: ProcessMasksRequest):
+    """
+    Cleans and Snaps masks.
+    """
+    try:
+        # Decode masks
+        input_masks = []
+        for m_data in req.masks:
+            mask = None
+            if isinstance(m_data, dict) and 'rle' in m_data:
+                rle = m_data['rle']
+                if isinstance(rle['counts'], str):
+                     rle = {'counts': rle['counts'].encode('utf-8'), 'size': rle['size']}
+                mask = mask_util.decode(rle)
+            elif isinstance(m_data, list):
+                mask = np.array(m_data)
+            else:
+                # Handle possibly already numpy or other format if passed internally, 
+                # but via API it's JSON so list or dict.
+                continue
+            
+            if mask is not None:
+                if mask.ndim == 3: mask = mask.squeeze()
+                if mask.dtype != np.uint8: mask = (mask > 0).astype(np.uint8)
+                input_masks.append(mask)
+
+        # Process
+        processed = input_masks
+        if req.clean:
+             # Add Morphological smoothing (Gaussian)
+            processed = polygon_processor.clean_masks(processed, min_area_pixels=req.min_area, smooth_sigma=1.0)
+        
+        if req.snap:
+            # Snap logic requires non-empty cleaned masks list
+            processed = polygon_processor.snap_masks(processed, max_snap_dist_ratio=0.02)
+            
+        # Encode back to RLE
+        output_masks = []
+        for mask in processed:
+             if mask is None:
+                 output_masks.append(None)
+                 continue
+             
+             rle = mask_util.encode(np.asfortranarray(mask))
+             rle['counts'] = rle['counts'].decode('utf-8')
+             output_masks.append({'rle': rle})
+             
+        return {"masks": output_masks}
+    except Exception as e:
+        print(f"[PROCESS] Error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
