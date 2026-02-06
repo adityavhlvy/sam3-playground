@@ -16,7 +16,10 @@ export default function DataEnginePage() {
   const [datasetPath, setDatasetPath] = useState("C:\\Users\\aksar\\OneDrive\\Pictures\\Saved Pictures");
   const [items, setItems] = useState<any[]>([]);
   const [currentImage, setCurrentImage] = useState<string | null>(null);
+
   const [promptText, setPromptText] = useState("field");
+  const [targetLabel, setTargetLabel] = useState("");
+  const [autoSnap, setAutoSnap] = useState(false);
 
   // Batch State
   const [isBatching, setIsBatching] = useState(false);
@@ -140,18 +143,27 @@ export default function DataEnginePage() {
         );
         const genData = await genRes.json();
 
+
         if (genData.proposals && genData.proposals.masks && genData.proposals.masks.length > 0) {
+          let masksToSave = genData.proposals.masks;
+
+
+
           // VISUALIZE: Show the masks to the user!
           setMaskResult(genData.proposals);
 
           // 2. Submit ALL masks as 'generated' (Pending Verification Phase 2)
           // Each mask becomes a separate proposal in the database
-          for (let maskIdx = 0; maskIdx < genData.proposals.masks.length; maskIdx++) {
+          const labelToUse = targetLabel.trim() || promptText;
+
+          for (let maskIdx = 0; maskIdx < masksToSave.length; maskIdx++) {
+            if (!masksToSave[maskIdx]) continue; // Skip empty/cleaned masks
+
             const decision = {
               image_id: item.path,
-              prompt: promptText,
+              prompt: labelToUse,
               decision: "generated",
-              mask_data: genData.proposals.masks[maskIdx],
+              mask_data: masksToSave[maskIdx],
               score: genData.proposals.scores?.[maskIdx] || null
             };
 
@@ -246,7 +258,7 @@ export default function DataEnginePage() {
       // We just save the first mask for now as verification
       const decision = {
         image_id: currentImage,
-        prompt: promptText,
+        prompt: targetLabel.trim() || promptText,
         decision: "accept",
         mask_data: maskResult.masks && maskResult.masks.length > 0 ? maskResult.masks[0] : null
       };
@@ -309,6 +321,17 @@ export default function DataEnginePage() {
               value={promptText}
               onChange={(e) => setPromptText(e.target.value)}
             />
+            <div className="divider divider-horizontal mx-1"></div>
+            <span className="text-sm">Save As:</span>
+            <input
+              type="text"
+              className="input input-sm input-bordered w-32"
+              placeholder="(Optional)"
+              value={targetLabel}
+              onChange={(e) => setTargetLabel(e.target.value)}
+              title="Alias Label (e.g. 'rice field' when prompt is 'field')"
+            />
+
             <button
               className="btn btn-sm btn-accent"
               onClick={handleAutoGenerate}

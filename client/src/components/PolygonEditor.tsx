@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import {
     Move, MousePointer, Trash2, ZoomIn, ZoomOut,
     Eye, EyeOff, Save, Minimize2, Undo, Redo, Edit3, Plus,
-    CheckSquare, Keyboard, Zap, SkipForward, Check
+    CheckSquare, Keyboard, Zap, SkipForward, Check, Magnet
 } from "lucide-react";
 
 interface PolygonData {
@@ -64,6 +64,12 @@ export function PolygonEditor({
     const [imageSize, setImageSize] = useState({ w: 0, h: 0 });
     const [drawingPoints, setDrawingPoints] = useState<number[][]>([]);
     const [showShortcuts, setShowShortcuts] = useState(false);
+
+    // Box Selection State
+    const [selectionBox, setSelectionBox] = useState<{ startX: number, startY: number, endX: number, endY: number } | null>(null);
+
+    // Potential Vertex State (ghost vertex on edge)
+    const [potentialVertex, setPotentialVertex] = useState<{ index: number, x: number, y: number } | null>(null);
 
     // History for undo/redo - use refs to avoid stale closures
     const historyRef = useRef<PolygonData[][]>([]);
@@ -403,6 +409,93 @@ export function PolygonEditor({
         return { nx: Math.max(0, Math.min(1, nx)), ny: Math.max(0, Math.min(1, ny)) };
     }, [getScale, imageSize, zoom, pan]);
 
+    // Calculate Polygon Area (Shoelace Formula) - returns approx pixels area at 100% scale
+    const calculatePolygonArea = useCallback((points: number[][]) => {
+        if (points.length < 3) return 0;
+        let area = 0;
+        const { scaleX, scaleY } = getScale();
+        // Use normalized coords converted to image pixels for consistent area regardless of zoom
+        const pxPoints = points.map(p => ({ x: p[0] * imageSize.w, y: p[1] * imageSize.h }));
+
+        for (let i = 0; i < pxPoints.length; i++) {
+            const j = (i + 1) % pxPoints.length;
+            area += pxPoints[i].x * pxPoints[j].y;
+            area -= pxPoints[j].x * pxPoints[i].y;
+        }
+        return Math.abs(area) / 2;
+    }, [getScale, imageSize]);
+
+    // Auto Clean - Remove small polygons
+    const handleAutoClean = useCallback(() => {
+        // Threshold: e.g., 20 pixels square
+        const AREA_THRESHOLD = 50;
+        updatePolygons(prev => prev.filter(p => calculatePolygonArea(p.points) >= AREA_THRESHOLD));
+    }, [updatePolygons, calculatePolygonArea]);
+
+    // SNAP ALL - calls backend to snap polygons using Voronoi
+    const handleSnap = async () => {
+        if (isLoading) return;
+        setIsLoading(true);
+        try {
+            // Group by proposal
+            const proposals: { [key: number]: number[][][] } = {};
+            polygons.forEach(p => {
+                const pid = p.proposalId || 0;
+                if (!proposals[pid]) proposals[pid] = [];
+                proposals[pid].push(p.points);
+            });
+
+            // Use editor session ID or just image URL as ID context
+            const res = await fetch("http://localhost:8000/api/data-engine/snap_polygons", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    image_id: imageUrl || "editor_session",
+                    proposals: proposals,
+                    width: imageSize.w,
+                    height: imageSize.h
+                })
+            });
+
+            if (!res.ok) throw new Error("Snap failed");
+
+            const data = await res.json();
+
+            if (data.proposals) {
+                const newPolygons: PolygonData[] = [];
+
+                // Reconstruct polygons preserving color/props
+                Object.entries(data.proposals).forEach(([pidStr, polys]) => {
+                    const pid = parseInt(pidStr);
+                    // Find original color/props for this pid
+                    const origPoly = polygons.find(p => p.proposalId === pid);
+                    const color = origPoly ? origPoly.color : COLORS[0];
+
+                    (polys as number[][][]).forEach(pts => {
+                        newPolygons.push({
+                            id: `poly-snap-${pid}-${Math.random()}`,
+                            points: pts,
+                            color: color,
+                            visible: true,
+                            proposalId: pid
+                        });
+                    });
+                });
+
+                // If any proposals were missing in response (e.g. empty), they are gone.
+                // But we should keep proposals that were NOT in the request (e.g. untracked)?
+                // Our request included ALL polygons. So replace all.
+
+                updatePolygons(() => newPolygons);
+            }
+        } catch (e) {
+            console.error("Snap error", e);
+            alert("Snap failed. Check console.");
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
     // Mouse handlers
     const handleMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
         const rect = canvasRef.current?.getBoundingClientRect();
@@ -429,6 +522,24 @@ export function PolygonEditor({
                 return;
             }
 
+            // Check if clicking on potential vertex (ghost vertex)
+            if (potentialVertex) {
+                const { x, y } = toCanvas(potentialVertex.x, potentialVertex.y);
+                const dist = Math.sqrt((cx - x) ** 2 + (cy - y) ** 2);
+                if (dist < 12) {
+                    // Turn it into a real vertex
+                    updatePolygons(prev => prev.map(p => {
+                        if (p.id !== selectedId) return p;
+                        const newPoints = [...p.points];
+                        newPoints.splice(potentialVertex.index, 0, [potentialVertex.x, potentialVertex.y]);
+                        return { ...p, points: newPoints };
+                    }));
+                    setEditingVertexIdx(potentialVertex.index); // Start dragging immediately
+                    setPotentialVertex(null);
+                    return;
+                }
+            }
+
             const poly = polygons.find(p => p.id === selectedId);
             if (poly) {
                 for (let i = 0; i < poly.points.length; i++) {
@@ -443,10 +554,12 @@ export function PolygonEditor({
         }
 
         if (mode === "select") {
+            let hitFound = false;
             for (const poly of polygons) {
                 if (!poly.visible) continue;
                 const points = poly.points.map(([nx, ny]) => toCanvas(nx, ny));
                 if (isPointInPolygon(cx, cy, points)) {
+                    hitFound = true;
                     if (e.shiftKey) {
                         setSelectedIds(prev => {
                             const next = new Set(prev);
@@ -460,9 +573,16 @@ export function PolygonEditor({
                     return;
                 }
             }
-            if (!e.shiftKey) setSelectedIds(new Set());
+
+            // Box Selection Start
+            if (!hitFound && !e.shiftKey) {
+                setSelectedIds(new Set()); // Deselect all if clicked empty space
+            }
+            if (!hitFound) {
+                setSelectionBox({ startX: cx, startY: cy, endX: cx, endY: cy });
+            }
         }
-    }, [mode, polygons, selectedId, toCanvas, toNormalized, hoveredVertexIdx, handleDeleteVertex]);
+    }, [mode, polygons, selectedId, toCanvas, toNormalized, hoveredVertexIdx, handleDeleteVertex, potentialVertex, updatePolygons, calculatePolygonArea]);
 
     const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
         const rect = canvasRef.current?.getBoundingClientRect();
@@ -478,9 +598,16 @@ export function PolygonEditor({
             return;
         }
 
+        // Selection Box Update
+        if (mode === "select" && selectionBox) {
+            setSelectionBox(prev => prev ? { ...prev, endX: cx, endY: cy } : null);
+            return;
+        }
+
         if (mode === "edit" && selectedId) {
             const poly = polygons.find(p => p.id === selectedId);
             if (poly) {
+                // Check vertex hover
                 let found = -1;
                 for (let i = 0; i < poly.points.length; i++) {
                     const { x, y } = toCanvas(poly.points[i][0], poly.points[i][1]);
@@ -488,6 +615,37 @@ export function PolygonEditor({
                     if (dist < 12) { found = i; break; }
                 }
                 setHoveredVertexIdx(found >= 0 ? found : null);
+
+                // Check edge hover for "Add Vertex" (if not hovering a vertex)
+                if (found === -1 && editingVertexIdx === null) {
+                    let bestEdge = null;
+                    let minEdgeDist = 10; // 10px tolerance
+
+                    for (let i = 0; i < poly.points.length; i++) {
+                        const j = (i + 1) % poly.points.length;
+                        const p1 = toCanvas(poly.points[i][0], poly.points[i][1]);
+                        const p2 = toCanvas(poly.points[j][0], poly.points[j][1]);
+
+                        // Distance from point to line segment
+                        const l2 = (p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2;
+                        if (l2 === 0) continue;
+                        let t = ((cx - p1.x) * (p2.x - p1.x) + (cy - p1.y) * (p2.y - p1.y)) / l2;
+                        t = Math.max(0, Math.min(1, t));
+                        const projX = p1.x + t * (p2.x - p1.x);
+                        const projY = p1.y + t * (p2.y - p1.y);
+
+                        const dist = Math.sqrt((cx - projX) ** 2 + (cy - projY) ** 2);
+                        if (dist < minEdgeDist) {
+                            minEdgeDist = dist;
+                            const { nx, ny } = toNormalized(projX, projY);
+                            bestEdge = { index: j, x: nx, y: ny }; // Insert BEFORE j (so index j) - Wait, insert at j means between i and j? splice(j, 0, item) inserts at j, shifting j and subsequent right.
+                            // i is 0, j is 1. We want to insert between 0 and 1. new index is 1. so j is correct.
+                        }
+                    }
+                    setPotentialVertex(bestEdge);
+                } else {
+                    setPotentialVertex(null);
+                }
             }
 
             if (editingVertexIdx !== null) {
@@ -500,15 +658,44 @@ export function PolygonEditor({
                 }));
             }
         }
-    }, [mode, editingVertexIdx, selectedId, toNormalized, polygons, toCanvas]);
+    }, [mode, editingVertexIdx, selectedId, toNormalized, polygons, toCanvas, selectionBox]);
 
     const handleMouseUp = useCallback(() => {
         if (isPanning.current) isPanning.current = false;
+
+        // Finish Selection Box
+        if (mode === "select" && selectionBox) {
+            const x1 = Math.min(selectionBox.startX, selectionBox.endX);
+            const y1 = Math.min(selectionBox.startY, selectionBox.endY);
+            const x2 = Math.max(selectionBox.startX, selectionBox.endX);
+            const y2 = Math.max(selectionBox.startY, selectionBox.endY);
+
+            // Allow small drag to be ignored (just click)
+            if (Math.abs(x2 - x1) > 5 || Math.abs(y2 - y1) > 5) {
+                const newSelection = new Set(selectedIds);
+                polygons.forEach(poly => {
+                    if (!poly.visible) return;
+                    // Check if *any* point is inside the box (simple check) 
+                    // OR if the polygon bounding box intersects the selection box (more robust)
+                    const points = poly.points.map(([nx, ny]) => toCanvas(nx, ny));
+                    const isInside = points.some(p => p.x >= x1 && p.x <= x2 && p.y >= y1 && p.y <= y2);
+                    // Also check if entire polygon is inside
+                    // For now, let's use: if bounding box center is inside selection box
+
+                    if (isInside) {
+                        newSelection.add(poly.id);
+                    }
+                });
+                setSelectedIds(newSelection);
+            }
+            setSelectionBox(null);
+        }
+
         if (editingVertexIdx !== null) {
             saveToHistory(polygons);
             setEditingVertexIdx(null);
         }
-    }, [editingVertexIdx, polygons, saveToHistory]);
+    }, [editingVertexIdx, polygons, saveToHistory, selectionBox, mode, selectedIds, toCanvas]);
 
     const handleContextMenu = useCallback((e: React.MouseEvent) => {
         if (mode === "edit") e.preventDefault();
@@ -609,9 +796,34 @@ export function PolygonEditor({
                             ctx.lineWidth = 1 / zoom;
                             ctx.stroke();
                         });
+
+                        // Draw Ghost Vertex
+                        if (potentialVertex) {
+                            const { x, y } = toCanvas(potentialVertex.x, potentialVertex.y);
+                            ctx.beginPath();
+                            ctx.arc(x, y, 5 / zoom, 0, Math.PI * 2);
+                            ctx.fillStyle = "rgba(255, 255, 255, 0.5)"; // Ghost transparency
+                            ctx.fill();
+                            ctx.strokeStyle = "#fff";
+                            ctx.stroke();
+                        }
                     }
                 }
             });
+
+            // Draw Selection Box
+            if (selectionBox) {
+                const x = Math.min(selectionBox.startX, selectionBox.endX);
+                const y = Math.min(selectionBox.startY, selectionBox.endY);
+                const w = Math.abs(selectionBox.endX - selectionBox.startX);
+                const h = Math.abs(selectionBox.endY - selectionBox.startY);
+
+                ctx.fillStyle = "rgba(59, 130, 246, 0.2)"; // Primary color transparent
+                ctx.fillRect(x, y, w, h);
+                ctx.strokeStyle = "#3b82f6";
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x, y, w, h);
+            }
 
             // Drawing mode
             if (drawingPoints.length > 0) {
@@ -637,7 +849,7 @@ export function PolygonEditor({
         }
 
         ctx.restore();
-    }, [polygons, selectedIds, selectedId, mode, zoom, pan, imageSize, width, height, getScale, drawingPoints, editingVertexIdx, hoveredVertexIdx]);
+    }, [polygons, selectedIds, selectedId, mode, zoom, pan, imageSize, width, height, getScale, drawingPoints, editingVertexIdx, hoveredVertexIdx, selectionBox, potentialVertex, toCanvas]);
 
     function isPointInPolygon(x: number, y: number, points: { x: number; y: number }[]): boolean {
         let inside = false;
@@ -686,6 +898,22 @@ export function PolygonEditor({
                         title="Simplify All (Q)"
                     >
                         <Minimize2 size={14} /> Simplify All → {simplifyTarget}pts
+                    </button>
+
+                    <button
+                        className="btn btn-sm btn-info gap-1"
+                        onClick={handleAutoClean}
+                        title="Auto Clean Small Polygons"
+                    >
+                        <Zap size={14} /> Auto Clean
+                    </button>
+
+                    <button
+                        className="btn btn-sm btn-accent gap-1"
+                        onClick={handleSnap}
+                        title="Snap All (Magnet)"
+                    >
+                        <Magnet size={14} /> Snap All
                     </button>
 
                     <input
